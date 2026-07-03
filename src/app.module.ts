@@ -20,6 +20,8 @@ import { AnalyticsModule } from './analytics/analytics.module';
 import { InvestmentsModule } from './investments/investments.module';
 import { TransfersModule } from './transfers/transfers.module';
 import { UsersModule } from './users/users.module';
+import { MusicModule } from './music/music.module';
+import { PlaylistsModule } from './playlists/playlists.module';
 
 @Module({
   imports: [
@@ -39,6 +41,8 @@ import { UsersModule } from './users/users.module';
     TransfersModule,
     InvestmentsModule,
     AnalyticsModule,
+    MusicModule,
+    PlaylistsModule,
   ],
   controllers: [AppController],
   providers: [AppService],

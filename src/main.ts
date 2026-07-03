@@ -6,7 +6,7 @@
 // Swagger docs, CORS (explicit origin only — never wildcard).
 // ─────────────────────────────────────────────────────────────────────────────
 
-import { INestApplication, ValidationPipe } from '@nestjs/common';
+import { INestApplication, Logger, ValidationPipe } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { NestFactory } from '@nestjs/core';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
@@ -19,6 +19,7 @@ import { AppModule } from './app.module';
 import { HttpExceptionFilter } from './common/filters/http-exception.filter';
 import { TransformInterceptor } from './common/interceptors/transform.interceptor';
 import { seedSystemCategories } from './categories/seeds/categories.seed';
+import { checkYtDlpInstalled } from './common/ytdlp/ytdlp.utils';
 
 const setupSwagger = (app: INestApplication): void => {
   const config = new DocumentBuilder()
@@ -70,6 +71,17 @@ async function bootstrap() {
 
   // Seed system categories once on bootstrap (idempotent)
   await seedSystemCategories(app.get(DataSource));
+
+  // Warn if yt-dlp is missing — never crash; V1 finance features must keep working.
+  const ytDlpInstalled = await checkYtDlpInstalled();
+  if (!ytDlpInstalled) {
+    Logger.warn(
+      'yt-dlp is not installed or not in PATH. Music caching will not work.\n' +
+        'Install with: pip install yt-dlp\n' +
+        'Then verify with: yt-dlp --version',
+      'Bootstrap',
+    );
+  }
 
   const port = configService.get<number>('PORT') ?? 4000;
   await app.listen(port);
