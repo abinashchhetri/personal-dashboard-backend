@@ -20,6 +20,9 @@ import { YtDlpProvider } from './providers/ytdlp.provider';
 import { RecommendationCacheRepository } from './repositories/recommendation-cache.repository';
 import { TracksRepository } from './repositories/tracks.repository';
 import { LastFmService } from './services/lastfm.service';
+import { LiveStreamService } from './services/live-stream.service';
+import { MusicQueueService } from './services/music-queue.service';
+import { MusicStorageService } from './services/music-storage.service';
 import { RecommendationsService } from './services/recommendations.service';
 import { TrackCacheService } from './services/track-cache.service';
 import { MusicCleanupTask } from './tasks/music-cleanup.task';
@@ -36,10 +39,13 @@ import { MusicCleanupTask } from './tasks/music-cleanup.task';
     RecommendationCacheRepository,
     YtDlpProvider,
     TrackCacheService,
+    LiveStreamService,
     LastFmService,
     RecommendationsService,
+    MusicStorageService,
+    MusicQueueService,
     MusicCleanupTask,
   ],
-  exports: [TrackCacheService, RecommendationsService, LastFmService],
+  exports: [TrackCacheService, RecommendationsService, LastFmService, MusicQueueService],
 })
 export class MusicModule {}

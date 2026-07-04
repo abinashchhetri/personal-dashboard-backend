@@ -3,6 +3,7 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 
 import { AccountsModule } from 'src/accounts/accounts.module';
 import { CategoriesModule } from 'src/categories/categories.module';
+import { OnboardingGuard } from 'src/common/guards';
 
 import { Transaction } from './entities/transaction.entity';
 import { LineItem } from './entities/line-item.entity';
@@ -17,7 +18,7 @@ import { TransactionsService } from './transactions.service';
     CategoriesModule,
   ],
   controllers: [TransactionsController],
-  providers: [TransactionsService, TransactionsRepository],
+  providers: [TransactionsService, TransactionsRepository, OnboardingGuard],
   exports: [TransactionsService],
 })
 export class TransactionsModule {}

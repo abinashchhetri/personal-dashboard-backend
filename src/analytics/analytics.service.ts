@@ -14,12 +14,14 @@ import { ItemTrendDto } from './dto/item-trend.dto';
 
 function resolveRange(dto: DateRangeDto): { start: Date; end: Date } {
   const now = new Date();
+  // Use UTC month boundaries so the range is identical regardless of the
+  // server's local timezone. Local Date constructors shift on machines that
+  // are not UTC, causing e.g. July 1 00:00 IST to become June 30 in UTC and
+  // exclude the entire first day of the month from the query.
   const start = dto.startDate
     ? new Date(dto.startDate)
-    : new Date(now.getFullYear(), now.getMonth(), 1);
-  const end = dto.endDate
-    ? new Date(dto.endDate)
-    : new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59, 999);
+    : new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1, 0, 0, 0));
+  const end = dto.endDate ? new Date(dto.endDate) : new Date();
   return { start, end };
 }
 
@@ -198,6 +200,21 @@ export class AnalyticsService {
       month: new Date(r.month).toISOString().slice(0, 7),
       total: round2(Number(r.total)),
     }));
+  }
+
+  // ── recent transactions ──────────────────────────────────────────────────────
+
+  async getRecentTransactions(userId: string, limit: number = 5): Promise<Transaction[]> {
+    const safeLimit = Math.min(Math.max(1, limit), 10);
+
+    return this.transactionRepo
+      .createQueryBuilder('t')
+      .leftJoinAndSelect('t.lineItems', 'lineItems')
+      .where('t.userId = :userId', { userId })
+      .andWhere('t.isPersonal = :yes', { yes: true })
+      .orderBy('t.transactedAt', 'DESC')
+      .take(safeLimit)
+      .getMany();
   }
 
   // ── net worth ────────────────────────────────────────────────────────────────

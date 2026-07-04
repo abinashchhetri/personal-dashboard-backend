@@ -80,4 +80,8 @@ export class AccountsRepository extends AbstractRepository<Account> {
   async decrementBalance(accountId: string, amount: number): Promise<void> {
     await this.entityRepository.decrement({ id: accountId }, 'currentBalance', amount);
   }
+
+  async countActiveForUser(userId: string): Promise<number> {
+    return this.entityRepository.count({ where: { userId, isArchived: false } });
+  }
 }

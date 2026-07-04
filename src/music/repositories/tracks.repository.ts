@@ -32,8 +32,9 @@ export class TracksRepository extends AbstractRepository<Track> {
     return this.entityRepository.findOne({ where: { externalId } });
   }
 
-  // Returns the existing row or inserts a new uncached stub. Safe to call
-  // concurrently — the second writer gets the row the first one just inserted.
+  // Returns the existing row or inserts a new uncached stub.
+  // Handles concurrent callers racing to insert the same externalId: the loser
+  // of the DB unique constraint (PG error 23505) re-reads and returns the winner's row.
   async findOrCreate(
     externalId: string,
     title: string,
@@ -43,17 +44,27 @@ export class TracksRepository extends AbstractRepository<Track> {
     const existing = await this.findByExternalId(externalId);
     if (existing) return existing;
 
-    const track = this.entityRepository.create({
-      externalId,
-      title,
-      artist,
-      coverUrl,
-      isCached: false,
-      playCount: 0,
-      source: TrackSourceEnum.YOUTUBE,
-      metadata: {},
-    });
-    return this.entityRepository.save(track);
+    try {
+      const track = this.entityRepository.create({
+        externalId,
+        title,
+        artist,
+        coverUrl,
+        isCached: false,
+        playCount: 0,
+        source: TrackSourceEnum.YOUTUBE,
+        metadata: {},
+      });
+      return await this.entityRepository.save(track);
+    } catch (err: unknown) {
+      // PostgreSQL unique violation — a concurrent request inserted first.
+      const pgErr = err as { code?: string };
+      if (pgErr.code === '23505') {
+        const winner = await this.findByExternalId(externalId);
+        if (winner) return winner;
+      }
+      throw err;
+    }
   }
 
   async findByExternalIds(externalIds: string[]): Promise<Track[]> {

@@ -26,6 +26,7 @@ import { Track } from '../entities/track.entity';
 import { TrackSourceEnum } from '../enums/track-source.enum';
 import { TracksRepository } from '../repositories/tracks.repository';
 import { YtDlpProvider } from '../providers/ytdlp.provider';
+import { cleanYouTubeTitle } from '../utils/title-cleaner.util';
 
 @Injectable()
 export class TrackCacheService {
@@ -71,14 +72,24 @@ export class TrackCacheService {
         return existing;
       }
 
+      const { cleanTitle, cleanArtist } = cleanYouTubeTitle(title, artist);
+
       if (existing) {
         // Reuse the existing row — just re-attempt the download.
         track = existing;
+        // Backfill cleanTitle/cleanArtist for rows created before this column existed.
+        if (!track.cleanTitle || !track.cleanArtist) {
+          await qr.manager.update(Track, { id: track.id }, { cleanTitle, cleanArtist });
+          track.cleanTitle = cleanTitle;
+          track.cleanArtist = cleanArtist;
+        }
       } else {
         track = qr.manager.create(Track, {
           externalId,
           title,
           artist,
+          cleanTitle,
+          cleanArtist,
           coverUrl: coverUrl ?? null,
           source: TrackSourceEnum.YOUTUBE,
           isCached: false,
@@ -100,8 +111,10 @@ export class TrackCacheService {
       // ASCII (0x20–0x7E) so the SDK doesn't throw ERR_INVALID_CHAR.
       const ascii = (s: string) => s.replace(/[^\x20-\x7E]/g, '').trim() || 'Unknown';
 
-      const s3Key = this.awsService.buildMusicKey(track.id);
-      await this.awsService.uploadFile(buffer, s3Key, 'audio/mpeg', {
+      // Opus/WebM — matches the format produced by YtDlpProvider.downloadTrack.
+      // Old .mp3 keys stored in the DB still work — s3Key is per-track in the DB.
+      const s3Key = this.awsService.buildMusicKey(track.id, 'webm');
+      await this.awsService.uploadFile(buffer, s3Key, 'audio/webm', {
         'x-track-id': track.id,
         'x-external-id': externalId,
         'x-artist': ascii(artist),
@@ -116,7 +129,7 @@ export class TrackCacheService {
           s3Key,
           duration: durationSeconds,
           fileSizeBytes,
-          metadata: { source: 'youtube' },
+          metadata: { source: 'youtube', mimeType: 'audio/webm' },
         } as any,
       );
 
@@ -163,7 +176,8 @@ export class TrackCacheService {
       let cleaned = 0;
 
       for (const file of files) {
-        if (!file.endsWith('.mp3')) continue;
+        // Include both .webm (current) and .mp3 (legacy) temp files.
+        if (!file.endsWith('.webm') && !file.endsWith('.mp3')) continue;
         const filePath = path.join(tempDir, file);
         try {
           const stat = await fsp.stat(filePath);

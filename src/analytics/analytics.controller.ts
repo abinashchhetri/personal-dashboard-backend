@@ -70,6 +70,16 @@ export class AnalyticsController {
     return this.analyticsService.getItemTrend(payload.id, dto);
   }
 
+  @Get('recent-transactions')
+  @ApiOperation({ summary: 'Recent personal transactions for the dashboard activity feed' })
+  @ApiQuery({ name: 'limit', required: false, example: 5, description: 'Number of transactions (max 10, default 5)' })
+  getRecentTransactions(
+    @Query('limit', new DefaultValuePipe(5), ParseIntPipe) limit: number,
+    @CurrentUser() payload: IPayload,
+  ) {
+    return this.analyticsService.getRecentTransactions(payload.id, limit);
+  }
+
   @Get('net-worth')
   @ApiOperation({ summary: 'Net worth: account balances + investment values' })
   getNetWorth(@CurrentUser() payload: IPayload) {

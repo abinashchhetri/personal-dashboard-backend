@@ -27,8 +27,9 @@ export class TransfersService {
       );
     }
 
-    // Verify both accounts exist and belong to this user.
-    const [fromAccount, toAccount] = await Promise.all([
+    // Verify both accounts exist and belong to this user before opening a
+    // transaction — throws 404/403 immediately so the QueryRunner never opens.
+    await Promise.all([
       this.assertOwnership(dto.fromAccountId, userId),
       this.assertOwnership(dto.toAccountId, userId),
     ]);
@@ -38,16 +39,39 @@ export class TransfersService {
     await qr.startTransaction();
 
     try {
+      // Re-fetch the source account inside the transaction with a pessimistic_read
+      // lock so two concurrent transfers cannot both pass the balance check before
+      // either write lands — without the lock, two 500-unit transfers against a
+      // 600-unit balance can both read 600 and both succeed.
+      const fromAccount = await qr.manager.findOne(Account, {
+        where: { id: dto.fromAccountId, userId },
+        lock: { mode: 'pessimistic_read' },
+      });
+      if (!fromAccount) throw new NotFoundException('Source account not found');
+
+      // TypeORM decimal columns arrive as strings from PostgreSQL even when a
+      // transformer is defined — raw QueryRunner reads bypass the entity transformer.
+      // Always parseFloat() before comparing. String comparison ("9" > "10") is
+      // lexicographic and returns true, silently passing an underfunded transfer.
+      const availableBalance = parseFloat(fromAccount.currentBalance.toString());
+      const transferAmount = parseFloat(dto.amount.toString());
+
+      if (availableBalance < transferAmount) {
+        throw new BadRequestException(
+          `Insufficient balance. Available: ${availableBalance.toFixed(2)}, Required: ${transferAmount.toFixed(2)}`,
+        );
+      }
+
       // Decrement source, increment destination — both on the same connection.
       await qr.manager.decrement(
         Account,
-        { id: fromAccount.id },
+        { id: dto.fromAccountId },
         'currentBalance',
         dto.amount,
       );
       await qr.manager.increment(
         Account,
-        { id: toAccount.id },
+        { id: dto.toAccountId },
         'currentBalance',
         dto.amount,
       );

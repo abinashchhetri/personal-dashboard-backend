@@ -25,6 +25,10 @@ export class GoogleStrategy extends PassportStrategy(Strategy, 'google') {
       clientSecret: configService.get<string>('GOOGLE_CLIENT_SECRET'),
       callbackURL: configService.get<string>('GOOGLE_CALLBACK_URL'),
       scope: ['email', 'profile'],
+      // Disable state parameter — requires express-session which this app doesn't use.
+      // Without this, passport tries to read/write req.session which doesn't exist,
+      // causing the OAuth code exchange to fail.
+      state: false,
     });
   }
 
