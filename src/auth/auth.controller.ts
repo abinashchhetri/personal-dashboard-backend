@@ -20,6 +20,7 @@ import { ConfigService } from '@nestjs/config';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { CookieOptions, Request, Response } from 'express';
 
+import { AccountsService } from 'src/accounts/accounts.service';
 import { CurrentUser } from 'src/common/decorators';
 import { IPayload } from 'src/common/interfaces';
 import { User } from 'src/users/entities/user.entity';
@@ -37,15 +38,20 @@ export class AuthController {
   constructor(
     private readonly authService: AuthService,
     private readonly configService: ConfigService,
+    private readonly accountsService: AccountsService,
   ) {
     this.frontendUrl =
-      this.configService.get<string>('CORS_ORIGIN') ?? 'http://localhost:3000';
+      this.configService.get<string>('FRONTEND_URL') ?? 'http://localhost:3000';
 
-    // secure: true is required for SameSite=None in production (cross-origin cookies)
+    // Production (cross-origin): Secure=true + SameSite=none required for
+    // cross-domain cookie delivery (frontend on Vercel, backend on tunnel).
+    // Development (same-host localhost): Secure=false + SameSite=lax because
+    // browsers reject Secure cookies over plain HTTP even on localhost.
+    const isProduction = this.configService.get<string>('NODE_ENV') === 'production';
     this.cookieBase = {
       httpOnly: true,
-      secure: this.configService.get<string>('NODE_ENV') === 'production',
-      sameSite: 'lax',
+      secure: isProduction,
+      sameSite: isProduction ? 'none' : 'lax',
     };
   }
 
@@ -63,8 +69,13 @@ export class AuthController {
     const { accessToken, refreshToken } = this.authService.generateTokens(
       req.user as User,
     );
+    // Set httpOnly cookies for Chrome/Firefox (cross-origin cookies work).
     this.setTokenCookies(res, accessToken, refreshToken);
-    res.redirect(`${this.frontendUrl}/dashboard`);
+    // Also embed tokens in the URL hash fragment for Safari ITP compatibility.
+    // Hash fragments are never sent to the server and are stripped from the
+    // Referer header, so they don't appear in server logs. The /callback page
+    // reads them, stores them in localStorage, and redirects to /dashboard.
+    res.redirect(`${this.frontendUrl}/callback#at=${accessToken}&rt=${refreshToken}`);
   }
 
   @Get('me')
@@ -73,6 +84,20 @@ export class AuthController {
   @ApiOperation({ summary: 'Return the authenticated user profile' })
   getMe(@CurrentUser() payload: IPayload) {
     return this.authService.getProfile(payload.id);
+  }
+
+  @Get('onboarding-status')
+  @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth()
+  @ApiOperation({ summary: 'Check whether the user has completed initial account setup' })
+  async onboardingStatus(@CurrentUser() payload: IPayload) {
+    const accountCount = await this.accountsService.countActive(payload.id);
+    const hasAccount = accountCount >= 1;
+    return {
+      hasAccount,
+      accountCount,
+      isOnboardingComplete: hasAccount,
+    };
   }
 
   @Post('refresh')
@@ -96,8 +121,10 @@ export class AuthController {
   @ApiBearerAuth()
   @ApiOperation({ summary: 'Clear auth cookies and end the session' })
   logout(@Res({ passthrough: true }) res: Response) {
-    res.clearCookie('access_token');
-    res.clearCookie('refresh_token');
+    // Must pass the same options used when setting the cookie — browsers match
+    // on path + domain + secure + sameSite before honouring a clearCookie call.
+    res.clearCookie('access_token', this.cookieBase);
+    res.clearCookie('refresh_token', this.cookieBase);
     return { message: 'Logged out successfully', data: null };
   }
 

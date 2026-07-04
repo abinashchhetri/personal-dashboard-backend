@@ -25,10 +25,18 @@ import { RecommendationCacheRepository } from '../repositories/recommendation-ca
 import { TracksRepository } from '../repositories/tracks.repository';
 import { LastFmService } from './lastfm.service';
 import { TrackCacheService } from './track-cache.service';
+import { cleanYouTubeTitle } from '../utils/title-cleaner.util';
 
 @Injectable()
 export class RecommendationsService {
   private readonly logger = new Logger(RecommendationsService.name);
+  // Per-sourceTrackId in-flight map. Stores the active Promise so that concurrent
+  // callers (play handler fire-and-forget + fillQueueInBackground) await the SAME
+  // Last.fm call instead of each starting their own. A Set<string> only prevents
+  // double execution — it caused the queue to stay empty because the second caller
+  // returned immediately, called prepareNextTrack with 0 rows, and exited the loop
+  // before the first caller finished writing to the DB.
+  private readonly runningFetches = new Map<string, Promise<void>>();
 
   constructor(
     private readonly lastFmService: LastFmService,
@@ -39,57 +47,165 @@ export class RecommendationsService {
     @InjectDataSource() private readonly dataSource: DataSource,
   ) {}
 
-  // Fire-and-forget — caller does: void this.recommendationsService.fetchAndStoreRecommendations(...)
-  // Stale rows for this source track are deleted atomically before inserting the fresh batch.
-  // recommendedExternalId is stored as a 'lastfm:{artist}:{title}' placeholder; the real
-  // YouTube ID is resolved lazily in prepareNextTrack via yt-dlp search.
+  // Public entry point. The play handler fires this as void (fire-and-forget)
+  // while fillQueueInBackground also calls it when 0 rows exist — which happens on
+  // every first play because the fire-and-forget hasn't resolved yet.
+  // Both callers receive the SAME in-flight Promise. When Last.fm returns, both
+  // unblock together and prepareNextTrack finds rows in the DB.
+  // (Old behaviour: second caller got an immediate return, called prepareNextTrack
+  // with 0 rows, and the fill loop exited — queue stayed empty.)
   async fetchAndStoreRecommendations(
     sourceTrackId: string,
     artist: string,
     title: string,
   ): Promise<void> {
+    const inFlight = this.runningFetches.get(sourceTrackId);
+    if (inFlight) {
+      this.logger.log(`fetchAndStoreRecommendations in-flight for ${sourceTrackId} — joining existing call`);
+      return inFlight;
+    }
+
+    const promise = this.doFetchAndStore(sourceTrackId, artist, title)
+      .finally(() => this.runningFetches.delete(sourceTrackId));
+    this.runningFetches.set(sourceTrackId, promise);
+    return promise;
+  }
+
+  // Actual Last.fm + fallback logic. Never called directly — always through
+  // fetchAndStoreRecommendations which ensures at most one execution per sourceTrackId.
+  private async doFetchAndStore(
+    sourceTrackId: string,
+    artist: string,
+    title: string,
+  ): Promise<void> {
     try {
-      const similar: ILastFmTrack[] = await this.lastFmService.getSimilarTracks(artist, title);
+      // Prefer cleanTitle/cleanArtist already stored on the Track entity — raw YouTube
+      // titles ("Lil Jhola @KRIZN (Official Music Video)") return zero Last.fm results.
+      // Fall back to running the cleaner if the Track row is unavailable or predates
+      // the cleanTitle column (null on rows created before this fix was deployed).
+      let track: Track | null = null;
+      try {
+        track = await this.tracksRepository.findOne({ id: sourceTrackId } as any);
+      } catch {
+        // Track row not reachable yet — proceed without it.
+      }
+
+      const cleaned = cleanYouTubeTitle(title, artist);
+      const searchArtist = track?.cleanArtist ?? cleaned.cleanArtist;
+      const searchTitle = track?.cleanTitle ?? cleaned.cleanTitle;
+
+      // Lazily backfill cleanTitle/cleanArtist for pre-migration rows.
+      if (track && (!track.cleanTitle || !track.cleanArtist)) {
+        try {
+          await this.tracksRepository.findOneAndUpdate(
+            { id: track.id } as any,
+            { cleanTitle: searchTitle, cleanArtist: searchArtist } as any,
+          );
+        } catch {
+          // Non-critical — the recommendation can still proceed without saving.
+        }
+      }
+
+      this.logger.log(`Last.fm search: "${searchArtist}" — "${searchTitle}"`);
+
+      const similar: ILastFmTrack[] = await this.lastFmService.getSimilarTracks(
+        searchArtist,
+        searchTitle,
+      );
 
       if (similar.length === 0) {
-        this.logger.warn(`No Last.fm results for "${artist} - ${title}"`);
+        this.logger.warn(
+          `Last.fm: no results for "${searchArtist} - ${searchTitle}". Running fallbacks.`,
+        );
+        await this.runFallbackRecommendations(sourceTrackId, track);
         return;
       }
 
-      // Look up the source track's YouTube externalId for the cache record.
-      let sourceExternalId = '';
-      try {
-        const sourceTrack = await this.tracksRepository.findOne({ id: sourceTrackId } as any);
-        sourceExternalId = sourceTrack.externalId;
-      } catch {
-        // Proceed with empty string if the track row isn't reachable yet.
-      }
-
-      await this.recommendationCacheRepository.deleteBySourceTrack(sourceTrackId);
-
-      const rows = similar.map((t) =>
-        this.dataSource.manager.create(RecommendationCache, {
-          sourceTrackId,
-          sourceExternalId,
-          // Placeholder unique per recommendation. Overwritten with the real
-          // YouTube ID in prepareNextTrack once yt-dlp resolves it.
-          recommendedExternalId: `lastfm:${t.artist}:${t.title}`,
-          recommendedTitle: t.title,
-          recommendedArtist: t.artist,
-          recommendedCoverUrl: t.coverUrl,
-          matchScore: t.matchScore,
-          apiSource: 'lastfm',
-          isPrepared: false,
-        }),
-      );
-
-      await this.dataSource.manager.save(RecommendationCache, rows);
-      this.logger.log(`Stored ${rows.length} recommendations for track ${sourceTrackId}`);
+      await this.storeRecommendations(sourceTrackId, similar);
     } catch (err: unknown) {
       this.logger.error(
         `fetchAndStoreRecommendations failed for ${sourceTrackId}: ${(err as Error).message}`,
       );
     }
+  }
+
+  // Stores a batch of recommendations, replacing any stale rows for this source track.
+  // All three code paths (Last.fm similar, artist top tracks, recently played) funnel here.
+  private async storeRecommendations(
+    sourceTrackId: string,
+    items: ILastFmTrack[],
+  ): Promise<void> {
+    let sourceExternalId = '';
+    try {
+      const sourceTrack = await this.tracksRepository.findOne({ id: sourceTrackId } as any);
+      sourceExternalId = sourceTrack.externalId;
+    } catch {
+      // Proceed with empty string if the track row isn't reachable yet.
+    }
+
+    await this.recommendationCacheRepository.deleteBySourceTrack(sourceTrackId);
+
+    const rows = items.map((t) =>
+      this.dataSource.manager.create(RecommendationCache, {
+        sourceTrackId,
+        sourceExternalId,
+        // Placeholder overwritten with the real YouTube ID in prepareNextTrack.
+        recommendedExternalId: `lastfm:${t.artist}:${t.title}`,
+        recommendedTitle: t.title,
+        recommendedArtist: t.artist,
+        recommendedCoverUrl: t.coverUrl,
+        matchScore: t.matchScore,
+        apiSource: 'lastfm',
+        isPrepared: false,
+      }),
+    );
+
+    await this.dataSource.manager.save(RecommendationCache, rows);
+    this.logger.log(`Stored ${rows.length} recommendations for track ${sourceTrackId}`);
+  }
+
+  // Called when Last.fm track.getSimilar returns zero results.
+  // Three escalating fallbacks so playback never stops with an empty queue.
+  private async runFallbackRecommendations(
+    sourceTrackId: string,
+    track: Track | null,
+  ): Promise<void> {
+    // Fallback 1: artist.getTopTracks — broader than track.getSimilar, works when the
+    // track is too obscure for Last.fm but the artist is known.
+    if (track?.cleanArtist) {
+      const artistTracks = await this.lastFmService.getTopTracksForArtist(track.cleanArtist);
+      if (artistTracks.length > 0) {
+        this.logger.log(`Fallback 1 success: artist top tracks for "${track.cleanArtist}"`);
+        await this.storeRecommendations(sourceTrackId, artistTracks);
+        return;
+      }
+    }
+
+    // Fallback 2: Recently cached tracks the user has actually played.
+    // These are guaranteed streamable (isCached=true) and genre-adjacent
+    // since the user chose to play them before.
+    const recentTracks = await this.tracksRepository.entityRepository.find({
+      where: { isCached: true },
+      order: { lastPlayedAt: 'DESC' },
+      take: 10,
+    });
+
+    if (recentTracks.length > 0) {
+      this.logger.log(`Fallback 2: using ${recentTracks.length} recently played tracks`);
+      const candidates = recentTracks.filter((t) => t.id !== sourceTrackId);
+      const fallbackItems: ILastFmTrack[] = candidates.map((t) => ({
+        title: t.cleanTitle ?? t.title,
+        artist: t.cleanArtist ?? t.artist,
+        coverUrl: t.coverUrl,
+        matchScore: 0.3, // low score — these are fallbacks, not real recommendations
+        externalId: null,
+      }));
+      await this.storeRecommendations(sourceTrackId, fallbackItems);
+      return;
+    }
+
+    // Fallback 3: Nothing at all — log and give up gracefully.
+    this.logger.warn(`All recommendation fallbacks exhausted for track ${sourceTrackId}`);
   }
 
   // Awaited by the controller ~30 s before the current track ends.
@@ -110,6 +226,20 @@ export class RecommendationsService {
 
   async getRawRecommendations(sourceTrackId: string): Promise<RecommendationCache[]> {
     return this.recommendationCacheRepository.findBySourceTrack(sourceTrackId);
+  }
+
+  // Returns the top N recommendations by matchScore for a source track.
+  // Includes both prepared and unprepared rows — used by MusicQueueService to
+  // check whether recommendations exist before deciding to call Last.fm again.
+  async getTopNRecommendations(
+    sourceTrackId: string,
+    limit: number = 5,
+  ): Promise<RecommendationCache[]> {
+    return this.recommendationCacheRepository.entityRepository.find({
+      where: { sourceTrackId },
+      order: { matchScore: 'DESC' },
+      take: limit,
+    });
   }
 
   async cleanOldRecommendations(): Promise<void> {
@@ -164,10 +294,21 @@ export class RecommendationsService {
 
       // Replace the lastfm: placeholder with the real YouTube externalId so
       // getNextTrack can locate the cached Track via findByExternalId.
-      await this.recommendationCacheRepository.findOneAndUpdate(
-        { id: recommendation.id } as any,
-        { recommendedExternalId: searchResult.externalId } as any,
+      // Use entityRepository.update directly (not findOneAndUpdate) because
+      // a concurrent fetchAndStoreRecommendations may have already called
+      // deleteBySourceTrack and re-inserted fresh rows with new IDs — meaning
+      // this specific row was deleted. That is recoverable: skip and retry.
+      const { affected } = await this.recommendationCacheRepository.entityRepository.update(
+        { id: recommendation.id },
+        { recommendedExternalId: searchResult.externalId },
       );
+      if (!affected) {
+        this.logger.warn(
+          `Recommendation ${recommendation.id} was invalidated by a concurrent fetch — skipping to next`,
+        );
+        if (attempt < 1) return this.doPrepareNextTrack(sourceTrackId, attempt + 1);
+        return null;
+      }
 
       const track = await this.trackCacheService.ensureCached(
         searchResult.externalId,

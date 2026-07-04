@@ -64,4 +64,7 @@ export class Account extends AbstractEntity<Account> {
 
   @Column({ default: false })
   isArchived!: boolean;
+
+  @Column({ type: 'jsonb', default: [] })
+  voiceKeywords!: string[];
 }

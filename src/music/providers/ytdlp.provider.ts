@@ -7,7 +7,7 @@
 // when artist/title contain quotes, semicolons, or other shell-special chars.
 // ─────────────────────────────────────────────────────────────────────────────
 
-import { spawn } from 'child_process';
+import { ChildProcess, spawn } from 'child_process';
 import { promises as fsp } from 'fs';
 import * as path from 'path';
 
@@ -186,7 +186,11 @@ export class YtDlpProvider implements IMusicSourceProvider {
     const ytDlpPath = this.configService.get<string>('YTDLP_PATH') ?? 'yt-dlp';
     const tempDir =
       this.configService.get<string>('YTDLP_TEMP_DIR') ?? '/tmp/sajilo-khata-audio';
-    const tempFilePath = path.join(tempDir, `${externalId}.mp3`);
+    // WebM container with Opus at 128 kbps — 62% smaller than raw DASH bitrate.
+    // YouTube already serves DASH audio as opus/webm; when the source matches,
+    // yt-dlp remuxes without re-encoding (fast). The postprocessor-args ensure
+    // the bitrate cap is enforced by ffmpeg if a re-encode is needed.
+    const tempFilePath = path.join(tempDir, `${externalId}.webm`);
 
     await fsp.mkdir(tempDir, { recursive: true });
 
@@ -194,8 +198,8 @@ export class YtDlpProvider implements IMusicSourceProvider {
     const downloadArgs = [
       externalId,
       '-x',
-      '--audio-format', 'mp3',
-      '--audio-quality', '0',
+      '--audio-format', 'webm',
+      '--postprocessor-args', 'ffmpeg:-c:a libopus -b:a 128k -vbr on -compression_level 10',
       '-o', tempFilePath,
       '--quiet',
       '--no-warnings',
@@ -255,6 +259,74 @@ export class YtDlpProvider implements IMusicSourceProvider {
         settle(() => reject(err));
       });
     });
+  }
+
+  // Resolves the direct CDN audio URL without downloading any audio data (~1-2 s).
+  // Used by LiveStreamService as Phase 1 before handing the URL to ffmpeg.
+  // Prefers webm/opus; falls back to m4a/aac; falls back to best available audio.
+  resolveUrl(externalId: string): Promise<{ url: string; mimeType: string }> {
+    const ytDlpPath = this.configService.get<string>('YTDLP_PATH') ?? 'yt-dlp';
+
+    return new Promise((resolve, reject) => {
+      let url = '';
+      let stderr = '';
+
+      const proc = spawn(ytDlpPath, [
+        '--get-url',
+        '-f', 'bestaudio[ext=webm]/bestaudio[ext=m4a]/bestaudio',
+        '--no-playlist',
+        '--',
+        externalId,
+      ]);
+
+      const timeout = setTimeout(() => {
+        proc.kill();
+        reject(new Error('yt-dlp URL resolution timed out after 15s'));
+      }, 15_000);
+
+      proc.stdout.on('data', (chunk: Buffer) => { url += chunk.toString(); });
+      proc.stderr.on('data', (chunk: Buffer) => { stderr += chunk.toString(); });
+
+      proc.on('close', (code: number | null) => {
+        clearTimeout(timeout);
+        const cleanUrl = url.trim().split('\n')[0] ?? '';
+        if (code !== 0 || !cleanUrl.startsWith('http')) {
+          this.logger.warn(`yt-dlp --get-url failed for ${externalId}: ${stderr.slice(0, 200)}`);
+          reject(new Error('Could not resolve stream URL'));
+          return;
+        }
+        const mimeType = cleanUrl.includes('.webm') ? 'audio/webm' : 'audio/mp4';
+        resolve({ url: cleanUrl, mimeType });
+      });
+
+      proc.on('error', (err: Error) => {
+        clearTimeout(timeout);
+        reject(err);
+      });
+    });
+  }
+
+  // Pipes bestaudio from YouTube directly to stdout — no temp file, no transcode.
+  // The caller owns the ChildProcess lifecycle (kill, error handling, etc.).
+  // stdout will be in the track's native container (typically webm/opus from YouTube).
+  streamTrack(externalId: string): { process: ChildProcess } {
+    const ytDlpPath = this.configService.get<string>('YTDLP_PATH') ?? 'yt-dlp';
+    const proc = spawn(ytDlpPath, [
+      externalId,
+      '-f', 'bestaudio[ext=webm]/bestaudio[ext=m4a]/bestaudio',
+      '-o', '-',
+      '--no-playlist',
+      '--quiet',
+      '--no-warnings',
+    ]);
+    return { process: proc };
+  }
+
+  // Public wrapper so LiveStreamService can extract duration from a completed
+  // branch-B temp file without duplicating the yt-dlp --print duration logic.
+  async getFileDuration(filePath: string): Promise<number> {
+    const ytDlpPath = this.configService.get<string>('YTDLP_PATH') ?? 'yt-dlp';
+    return this.extractDuration(ytDlpPath, filePath);
   }
 
   // Reads duration from the already-downloaded local file. Returns 0 on any failure.

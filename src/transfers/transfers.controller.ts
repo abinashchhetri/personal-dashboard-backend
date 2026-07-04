@@ -16,6 +16,7 @@ import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { CurrentUser } from 'src/common/decorators';
 import { IPayload } from 'src/common/interfaces';
 import { JwtAuthGuard } from 'src/auth/guards/jwt-auth.guard';
+import { OnboardingGuard } from 'src/common/guards';
 
 import { TransfersService } from './transfers.service';
 import { CreateTransferDto } from './dto/create-transfer.dto';
@@ -29,6 +30,7 @@ export class TransfersController {
   constructor(private readonly transfersService: TransfersService) {}
 
   @Post()
+  @UseGuards(JwtAuthGuard, OnboardingGuard)
   @ApiOperation({ summary: 'Move money between two of your accounts' })
   create(
     @Body() createTransferDto: CreateTransferDto,

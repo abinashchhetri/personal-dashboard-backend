@@ -44,23 +44,38 @@ export class AwsService {
   }
 
   // Returns the s3Key, not a URL. Callers call getPresignedUrl separately when needed.
+  // Files > 5 MB are uploaded via @aws-sdk/lib-storage's Upload helper which
+  // splits the payload into parts and retries each part independently — more
+  // reliable on slow connections than a single PutObject. Files ≤ 5 MB use
+  // PutObject directly (simpler, fewer round-trips). At 128 kbps opus, a
+  // 4-minute track is ~3.8 MB — the multipart path is a safety net for very
+  // long tracks or future higher-bitrate formats.
+  private static readonly MULTIPART_THRESHOLD = 5 * 1024 * 1024; // 5 MB
+
   async uploadFile(
     buffer: Buffer,
     key: string,
     mimeType: string,
     metadata?: Record<string, string>,
   ): Promise<string> {
-    await this.s3.send(
-      new PutObjectCommand({
-        Bucket: this.bucket,
-        Key: key,
-        Body: buffer,
-        ContentType: mimeType,
-        StorageClass: 'STANDARD',
-        ...(metadata && { Metadata: metadata }),
-      }),
-    );
-    this.logger.log(`Uploaded ${key} (${mimeType})`);
+    const params = {
+      Bucket: this.bucket,
+      Key: key,
+      Body: buffer,
+      ContentType: mimeType,
+      StorageClass: 'STANDARD' as const,
+      ...(metadata && { Metadata: metadata }),
+    };
+
+    if (buffer.length > AwsService.MULTIPART_THRESHOLD) {
+      const { Upload } = await import('@aws-sdk/lib-storage');
+      const upload = new Upload({ client: this.s3, params });
+      await upload.done();
+    } else {
+      await this.s3.send(new PutObjectCommand(params));
+    }
+
+    this.logger.log(`Uploaded ${key} (${mimeType}, ${buffer.length} bytes)`);
     return key;
   }
 
@@ -73,10 +88,13 @@ export class AwsService {
 
   // Proxies byte-range audio to the raw Node ServerResponse — S3 URL is never
   // sent to the client. Pipe Body as a Readable; SDK v3 returns Readable in Node.
+  // contentType defaults to 'audio/mpeg' so legacy mp3-cached tracks are unchanged;
+  // pass 'audio/webm' for tracks cached via the live-tee path.
   async getStreamRange(
     key: string,
     rangeHeader: string | undefined,
     res: ServerResponse,
+    contentType = 'audio/mpeg',
   ): Promise<void> {
     const command = new GetObjectCommand({
       Bucket: this.bucket,
@@ -99,12 +117,12 @@ export class AwsService {
       res.writeHead(206, {
         'Content-Range': response.ContentRange ?? '',
         'Accept-Ranges': 'bytes',
-        'Content-Type': 'audio/mpeg',
+        'Content-Type': contentType,
         'Content-Length': contentLength,
       });
     } else {
       res.writeHead(200, {
-        'Content-Type': 'audio/mpeg',
+        'Content-Type': contentType,
         'Content-Length': contentLength,
       });
     }

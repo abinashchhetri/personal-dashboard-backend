@@ -8,7 +8,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { OmitType, PartialType, ApiPropertyOptional } from '@nestjs/swagger';
-import { IsBoolean, IsOptional } from 'class-validator';
+import { IsArray, IsBoolean, IsOptional, IsString } from 'class-validator';
 
 import { CreateAccountDto } from './create-account.dto';
 
@@ -19,4 +19,10 @@ export class UpdateAccountDto extends PartialType(
   @IsBoolean()
   @IsOptional()
   isArchived?: boolean;
+
+  @ApiPropertyOptional({ example: ['esewa', 'eSewa wallet', 'mobile banking'] })
+  @IsArray()
+  @IsString({ each: true })
+  @IsOptional()
+  voiceKeywords?: string[];
 }

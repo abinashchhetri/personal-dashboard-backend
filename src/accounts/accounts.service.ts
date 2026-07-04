@@ -136,6 +136,30 @@ export class AccountsService {
     }
   }
 
+  async countActive(userId: string): Promise<number> {
+    return this.accountsRepository.countActiveForUser(userId);
+  }
+
+  async getAccountsWithVoiceKeywords(userId: string) {
+    const accounts = await this.accountsRepository.entityRepository.find({
+      where: { userId, isArchived: false },
+    });
+
+    return accounts.map((account) => ({
+      id: account.id,
+      name: account.name,
+      type: account.type,
+      voiceKeywords: account.voiceKeywords,
+      // allMatchTerms lets the voice assistant match on any keyword OR on the
+      // account name / type — without the caller having to duplicate this logic.
+      allMatchTerms: [
+        ...account.voiceKeywords.map((k) => k.toLowerCase()),
+        account.name.toLowerCase(),
+        account.type.toLowerCase(),
+      ],
+    }));
+  }
+
   async remove(id: string, userId: string): Promise<{ message: string }> {
     await this.accountsRepository.findOne({ id, userId } as any);
 

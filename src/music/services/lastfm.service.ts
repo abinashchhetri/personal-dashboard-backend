@@ -75,4 +75,62 @@ export class LastFmService {
       return [];
     }
   }
+
+  // Called when track.getSimilar returns zero results — broader fallback that
+  // returns the artist's generally popular tracks rather than track-specific similar ones.
+  async getTopTracksForArtist(artist: string, limit = 10): Promise<ILastFmTrack[]> {
+    const apiKey = this.configService.get<string>('LASTFM_API_KEY');
+    if (!apiKey) {
+      this.logger.warn('LASTFM_API_KEY is not configured — skipping Last.fm lookup');
+      return [];
+    }
+
+    const url =
+      `https://ws.audioscrobbler.com/2.0/?method=artist.getTopTracks` +
+      `&artist=${encodeURIComponent(artist)}` +
+      `&api_key=${apiKey}` +
+      `&format=json` +
+      `&limit=${limit}`;
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 5_000);
+
+    try {
+      const res = await fetch(url, { signal: controller.signal });
+      clearTimeout(timeout);
+
+      const json = (await res.json()) as Record<string, unknown>;
+
+      if (json['error']) {
+        this.logger.warn(
+          `Last.fm error ${String(json['error'])}: ${String(json['message'])} — artist "${artist}"`,
+        );
+        return [];
+      }
+
+      const toptracks = (json['toptracks'] as Record<string, unknown>) ?? {};
+      const rawTracks = (toptracks['track'] ?? []) as Array<Record<string, unknown>>;
+
+      return rawTracks.map((track) => {
+        const images = (track['image'] as Array<Record<string, string>>) ?? [];
+        const lastImage = images[images.length - 1];
+        const coverUrl = lastImage?.['#text'] || null;
+        const trackArtist = (track['artist'] as Record<string, unknown>) ?? {};
+
+        return {
+          title: track['name'] as string,
+          artist: (trackArtist['name'] as string) ?? artist,
+          coverUrl,
+          matchScore: 0.4,
+          externalId: null,
+        };
+      });
+    } catch (err: unknown) {
+      clearTimeout(timeout);
+      this.logger.error(
+        `Last.fm artist.getTopTracks failed for "${artist}": ${(err as Error).message}`,
+      );
+      return [];
+    }
+  }
 }

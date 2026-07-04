@@ -57,6 +57,12 @@ export class AccountsController {
     return this.accountsService.findAll(findAllAccountsDto, payload.id);
   }
 
+  @Get('voice-keywords')
+  @ApiOperation({ summary: 'Return all active accounts with their voice-recognition keyword lists' })
+  getVoiceKeywords(@CurrentUser() payload: IPayload) {
+    return this.accountsService.getAccountsWithVoiceKeywords(payload.id);
+  }
+
   @Get(':id')
   @ApiOperation({ summary: 'Get a single account by ID' })
   findOne(

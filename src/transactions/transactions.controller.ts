@@ -17,6 +17,7 @@ import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { CurrentUser } from 'src/common/decorators';
 import { IPayload } from 'src/common/interfaces';
 import { JwtAuthGuard } from 'src/auth/guards/jwt-auth.guard';
+import { OnboardingGuard } from 'src/common/guards';
 
 import { TransactionsService } from './transactions.service';
 import { CreateTransactionDto } from './dto/create-transaction.dto';
@@ -31,6 +32,7 @@ export class TransactionsController {
   constructor(private readonly transactionsService: TransactionsService) {}
 
   @Post()
+  @UseGuards(JwtAuthGuard, OnboardingGuard)
   @ApiOperation({ summary: 'Log a new transaction (expense, income, or in_transit)' })
   create(
     @Body() createTransactionDto: CreateTransactionDto,

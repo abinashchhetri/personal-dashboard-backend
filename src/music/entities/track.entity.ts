@@ -30,6 +30,14 @@ export class Track extends AbstractEntity<Track> {
   @Column({ type: 'varchar' })
   artist!: string;
 
+  // Cleaned versions used for Last.fm API calls — raw YouTube titles return zero results.
+  // Null for rows created before this column was added; backfilled lazily on next cache/play.
+  @Column({ type: 'varchar', nullable: true })
+  cleanTitle!: string | null;
+
+  @Column({ type: 'varchar', nullable: true })
+  cleanArtist!: string | null;
+
   @Column({ type: 'varchar', nullable: true })
   album!: string | null;
 
