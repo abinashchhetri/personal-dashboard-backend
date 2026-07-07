@@ -38,4 +38,7 @@ export class LineItem extends AbstractEntity<LineItem> {
 
   @Column({ type: 'decimal', precision: 14, scale: 2, transformer: decimalToNumber })
   amount!: number;
+
+  @Column({ type: 'varchar', nullable: true })
+  merchant!: string | null;
 }

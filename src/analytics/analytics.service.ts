@@ -65,6 +65,7 @@ export class AnalyticsService {
       .where('t.userId = :userId', { userId })
       .andWhere('t.isPersonal = :yes', { yes: true })
       .andWhere('t.transactedAt BETWEEN :start AND :end', { start, end })
+      .andWhere('t.deletedAt IS NULL')
       .getRawOne<{ totalSpent: string; totalIncome: string }>();
 
     const totalSpent = round2(Number(raw?.totalSpent ?? 0));
@@ -92,6 +93,7 @@ export class AnalyticsService {
       .andWhere('t.isPersonal = :yes', { yes: true })
       .andWhere('t.type = :type', { type: TransactionTypeEnum.EXPENSE })
       .andWhere('t.transactedAt BETWEEN :start AND :end', { start, end })
+      .andWhere('t.deletedAt IS NULL')
       .groupBy('li.categoryId')
       .addGroupBy('c.name')
       .orderBy('total', 'DESC')
@@ -131,6 +133,7 @@ export class AnalyticsService {
       .where('t.userId = :userId', { userId })
       .andWhere('t.isPersonal = :yes', { yes: true })
       .andWhere('t.transactedAt BETWEEN :start AND :end', { start, end })
+      .andWhere('t.deletedAt IS NULL')
       .groupBy(`t."accountId"`)
       .getRawMany<{ accountId: string; periodSpend: string; transactionCount: string }>();
 
@@ -164,6 +167,7 @@ export class AnalyticsService {
       .andWhere('t.isPersonal = :yes', { yes: true })
       .andWhere('t.type = :type', { type: TransactionTypeEnum.EXPENSE })
       .andWhere('t.transactedAt BETWEEN :start AND :end', { start, end })
+      .andWhere('t.deletedAt IS NULL')
       .groupBy('LOWER(li.name)')
       .orderBy('total', 'DESC')
       .limit(safeLimit)
@@ -191,6 +195,7 @@ export class AnalyticsService {
       .andWhere('t.type = :type', { type: TransactionTypeEnum.EXPENSE })
       .andWhere('LOWER(li.name) = LOWER(:itemName)', { itemName: dto.itemName })
       .andWhere('t.transactedAt BETWEEN :start AND :end', { start, end })
+      .andWhere('t.deletedAt IS NULL')
       .groupBy(`DATE_TRUNC('month', t."transactedAt")`)
       .orderBy('month', 'ASC')
       .getRawMany<{ month: string | Date; total: string }>();
@@ -212,6 +217,7 @@ export class AnalyticsService {
       .leftJoinAndSelect('t.lineItems', 'lineItems')
       .where('t.userId = :userId', { userId })
       .andWhere('t.isPersonal = :yes', { yes: true })
+      .andWhere('t.deletedAt IS NULL')
       .orderBy('t.transactedAt', 'DESC')
       .take(safeLimit)
       .getMany();

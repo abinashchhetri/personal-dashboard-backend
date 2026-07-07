@@ -1,11 +1,13 @@
 import {
   Column,
+  DeleteDateColumn,
   Entity,
   Index,
   JoinColumn,
   ManyToOne,
   OneToMany,
 } from 'typeorm';
+
 
 import { AbstractEntity } from 'src/common/database/abstract.entity';
 import { Account } from 'src/accounts/entities/account.entity';
@@ -18,6 +20,10 @@ const decimalToNumber = {
   from: (v: string | number): number => Number(v),
 };
 
+@Index('IDX_transactions_userId_transactedAt', ['userId', 'transactedAt'])
+@Index('IDX_transactions_userId_categoryId_transactedAt', ['userId', 'categoryId', 'transactedAt'])
+@Index('IDX_transactions_active', ['userId', 'transactedAt'], { where: '"deletedAt" IS NULL' })
+@Index('IDX_transactions_user_idempotency', ['userId', 'idempotencyKey'], { unique: true, where: '"idempotencyKey" IS NOT NULL' })
 @Entity('transactions')
 export class Transaction extends AbstractEntity<Transaction> {
   @Index()
@@ -64,4 +70,26 @@ export class Transaction extends AbstractEntity<Transaction> {
   // in the same QueryRunner transaction.
   @OneToMany(() => LineItem, (item) => item.transaction, { cascade: true })
   lineItems!: LineItem[];
+
+  // ── V2 additive fields ───────────────────────────────────────────────────
+
+  @Column({ type: 'varchar', nullable: true })
+  merchant!: string | null;
+
+  @Column({ type: 'varchar', length: 3, default: 'NPR' })
+  currency!: string;
+
+  @Column({ type: 'jsonb', default: [] })
+  tags!: string[];
+
+  // Soft-delete: null = live row. TypeORM auto-excludes rows with a non-null
+  // deletedAt from find* calls. Query builders need an explicit IS NULL filter
+  // for joined entities; the main entity's query builder auto-filters.
+  @DeleteDateColumn({ type: 'timestamptz', nullable: true })
+  deletedAt!: Date | null;
+
+  // Client-supplied idempotency key. Unique per user (partial unique index
+  // WHERE idempotencyKey IS NOT NULL so omitted keys don't collide).
+  @Column({ type: 'varchar', nullable: true })
+  idempotencyKey!: string | null;
 }

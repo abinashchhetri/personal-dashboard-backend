@@ -186,23 +186,31 @@ export class YtDlpProvider implements IMusicSourceProvider {
     const ytDlpPath = this.configService.get<string>('YTDLP_PATH') ?? 'yt-dlp';
     const tempDir =
       this.configService.get<string>('YTDLP_TEMP_DIR') ?? '/tmp/sajilo-khata-audio';
-    // WebM container with Opus at 128 kbps — 62% smaller than raw DASH bitrate.
-    // YouTube already serves DASH audio as opus/webm; when the source matches,
-    // yt-dlp remuxes without re-encoding (fast). The postprocessor-args ensure
-    // the bitrate cap is enforced by ffmpeg if a re-encode is needed.
     const tempFilePath = path.join(tempDir, `${externalId}.webm`);
 
     await fsp.mkdir(tempDir, { recursive: true });
 
-    // Direct download by externalId — faster than re-searching by title.
+    // Download YouTube's native Opus-in-WebM audio stream directly (format 251).
+    // No -x / --audio-format / postprocessor: YouTube already serves Opus at
+    // ~128 kbps, so we copy the stream verbatim — faster, lossless, no ffmpeg.
+    //
+    // The previous args used `--audio-format webm`, but "webm" is a CONTAINER,
+    // not a codec — yt-dlp rejects it ("invalid audio format webm given") and
+    // exits before downloading anything, so EVERY cache download failed here.
+    //
+    // `bestaudio[ext=webm]` picks the Opus/WebM stream; the `/bestaudio` fallback
+    // covers the rare track with no WebM audio. `--` terminates option parsing so
+    // an id starting with "-" can never be read as a flag.
     const downloadArgs = [
-      externalId,
-      '-x',
-      '--audio-format', 'webm',
-      '--postprocessor-args', 'ffmpeg:-c:a libopus -b:a 128k -vbr on -compression_level 10',
+      ...this.youtubeReliabilityArgs(),
+      '-f', 'bestaudio[ext=webm]/bestaudio',
       '-o', tempFilePath,
-      '--quiet',
+      '--no-playlist',
+      '--no-part',
+      '--no-progress',
       '--no-warnings',
+      '--',
+      externalId,
     ];
 
     try {
@@ -211,7 +219,7 @@ export class YtDlpProvider implements IMusicSourceProvider {
 
       const buffer = await fsp.readFile(tempFilePath);
       const fileSizeBytes = buffer.length;
-      const durationSeconds = await this.extractDuration(ytDlpPath, tempFilePath);
+      const durationSeconds = await this.extractDuration(tempFilePath);
 
       this.logger.log(
         `Downloaded ${externalId}: ${fileSizeBytes} bytes, ${durationSeconds}s`,
@@ -221,6 +229,26 @@ export class YtDlpProvider implements IMusicSourceProvider {
       // Swallow unlink errors — never let cleanup failure mask the real result.
       fsp.unlink(tempFilePath).catch(() => {});
     }
+  }
+
+  // Flags that make YouTube extraction resilient to intermittent 403s.
+  // Prepend to every yt-dlp invocation that fetches actual audio data.
+  //
+  // --js-runtimes node: YouTube gates its CDN URLs behind a JavaScript "n"
+  //   signature challenge. Without a JS runtime, yt-dlp falls back to no-JS
+  //   player clients (android_vr, tv) whose URLs YouTube increasingly rejects
+  //   with HTTP 403 under load. The backend already runs on Node, so pointing
+  //   yt-dlp at "node" solves the challenge properly with no extra dependency.
+  //   (Relies on `node` being on PATH — guaranteed, since Node launched us.)
+  // --extractor-retries / --retries: a 403 is often transient; re-running
+  //   extraction fetches a fresh CDN URL, and --retries re-attempts the HTTP
+  //   download, so a single throttled response no longer fails the request.
+  private youtubeReliabilityArgs(): string[] {
+    return [
+      '--js-runtimes', 'node',
+      '--extractor-retries', '3',
+      '--retries', '5',
+    ];
   }
 
   // Runs yt-dlp and resolves when done. Rejects with ServiceUnavailableException
@@ -233,12 +261,19 @@ export class YtDlpProvider implements IMusicSourceProvider {
     return new Promise((resolve, reject) => {
       const proc = spawn(ytDlpPath, args);
       let settled = false;
+      let stderr = '';
 
       const settle = (fn: () => void) => {
         if (settled) return;
         settled = true;
         fn();
       };
+
+      // Capture stderr so a non-zero exit reports the actual yt-dlp error
+      // (bad format, geo-block, removed video, …) instead of a generic message.
+      proc.stderr?.on('data', (chunk: Buffer) => {
+        stderr += chunk.toString();
+      });
 
       const timer = setTimeout(() => {
         proc.kill();
@@ -248,7 +283,12 @@ export class YtDlpProvider implements IMusicSourceProvider {
       proc.on('close', (code: number | null) => {
         clearTimeout(timer);
         if (code !== 0) {
-          settle(() => reject(new BadRequestException('Track not available from source')));
+          const detail =
+            stderr.trim().split('\n').filter(Boolean).pop() ?? `exit code ${code}`;
+          this.logger.warn(`yt-dlp download failed (exit ${code}): ${detail}`);
+          settle(() =>
+            reject(new BadRequestException(`Track not available from source: ${detail}`)),
+          );
         } else {
           settle(() => resolve());
         }
@@ -272,6 +312,7 @@ export class YtDlpProvider implements IMusicSourceProvider {
       let stderr = '';
 
       const proc = spawn(ytDlpPath, [
+        ...this.youtubeReliabilityArgs(),
         '--get-url',
         '-f', 'bestaudio[ext=webm]/bestaudio[ext=m4a]/bestaudio',
         '--no-playlist',
@@ -312,27 +353,39 @@ export class YtDlpProvider implements IMusicSourceProvider {
   streamTrack(externalId: string): { process: ChildProcess } {
     const ytDlpPath = this.configService.get<string>('YTDLP_PATH') ?? 'yt-dlp';
     const proc = spawn(ytDlpPath, [
-      externalId,
+      ...this.youtubeReliabilityArgs(),
       '-f', 'bestaudio[ext=webm]/bestaudio[ext=m4a]/bestaudio',
       '-o', '-',
       '--no-playlist',
       '--quiet',
       '--no-warnings',
+      '--',
+      externalId,
     ]);
     return { process: proc };
   }
 
   // Public wrapper so LiveStreamService can extract duration from a completed
-  // branch-B temp file without duplicating the yt-dlp --print duration logic.
+  // branch-B temp file without duplicating the ffprobe logic.
   async getFileDuration(filePath: string): Promise<number> {
-    const ytDlpPath = this.configService.get<string>('YTDLP_PATH') ?? 'yt-dlp';
-    return this.extractDuration(ytDlpPath, filePath);
+    return this.extractDuration(filePath);
   }
 
-  // Reads duration from the already-downloaded local file. Returns 0 on any failure.
-  private extractDuration(ytDlpPath: string, filePath: string): Promise<number> {
+  // Reads duration (seconds) from an already-downloaded local file via ffprobe.
+  // NOT `yt-dlp --print duration <path>`: on Windows yt-dlp misreads a local path
+  // like "C:\..." as a URL with scheme "c" and always errors, so duration was
+  // silently stored as 0. ffprobe reads the local container directly.
+  // Returns 0 on any failure — duration is non-critical metadata.
+  private extractDuration(filePath: string): Promise<number> {
+    const ffprobePath = this.resolveFfprobePath();
+
     return new Promise((resolve) => {
-      const proc = spawn(ytDlpPath, ['--print', 'duration', filePath]);
+      const proc = spawn(ffprobePath, [
+        '-v', 'error',
+        '-show_entries', 'format=duration',
+        '-of', 'default=noprint_wrappers=1:nokey=1',
+        filePath,
+      ]);
       const chunks: Buffer[] = [];
 
       proc.stdout.on('data', (chunk: Buffer) => chunks.push(chunk));
@@ -343,11 +396,20 @@ export class YtDlpProvider implements IMusicSourceProvider {
           return;
         }
         const raw = Buffer.concat(chunks).toString('utf-8').trim();
-        const n = parseInt(raw, 10);
-        resolve(isNaN(n) ? 0 : n);
+        const n = Math.round(parseFloat(raw));
+        resolve(Number.isFinite(n) ? n : 0);
       });
 
       proc.on('error', () => resolve(0));
     });
+  }
+
+  // ffprobe ships alongside ffmpeg. Derive it from FFMPEG_PATH by swapping the
+  // trailing "ffmpeg" (optionally ".exe") for "ffprobe", preserving dir + ext;
+  // fall back to "ffprobe" on PATH when FFMPEG_PATH is the bare command.
+  private resolveFfprobePath(): string {
+    const ffmpegPath = this.configService.get<string>('FFMPEG_PATH') ?? 'ffmpeg';
+    const probe = ffmpegPath.replace(/ffmpeg(\.exe)?$/i, 'ffprobe$1');
+    return probe === ffmpegPath ? 'ffprobe' : probe;
   }
 }
