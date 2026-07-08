@@ -21,8 +21,10 @@ import { TypeOrmModule } from '@nestjs/typeorm';
         password: configService.get<string>('DB_PASSWORD'),
         database: configService.get<string>('DB_NAME'),
         autoLoadEntities: true,
-        // synchronize only in local dev — switch to migrations before any real deployment
         synchronize: configService.get<string>('NODE_ENV') !== 'production',
+        migrations: ['dist/migrations/*{.js,.ts}'],
+        // Auto-run pending migrations on startup in production; dev uses synchronize instead.
+        migrationsRun: configService.get<string>('NODE_ENV') === 'production',
       }),
       inject: [ConfigService],
     }),

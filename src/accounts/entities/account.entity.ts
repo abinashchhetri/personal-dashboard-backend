@@ -67,4 +67,7 @@ export class Account extends AbstractEntity<Account> {
 
   @Column({ type: 'jsonb', default: [] })
   voiceKeywords!: string[];
+
+  @Column({ type: 'varchar', length: 3, default: 'NPR' })
+  currency!: string;
 }

@@ -44,6 +44,7 @@ import { TracksRepository } from './repositories/tracks.repository';
 import { LiveStreamService } from './services/live-stream.service';
 import { MusicQueueService } from './services/music-queue.service';
 import { RecommendationsService } from './services/recommendations.service';
+import { TrackCacheService } from './services/track-cache.service';
 
 @ApiTags('Music')
 @ApiBearerAuth()
@@ -59,6 +60,7 @@ export class MusicController {
     private readonly recommendationsService: RecommendationsService,
     private readonly ytDlpProvider: YtDlpProvider,
     private readonly musicQueueService: MusicQueueService,
+    private readonly trackCacheService: TrackCacheService,
   ) {}
 
   // ── Static routes first — must be declared before any /:trackId param routes ──
@@ -237,31 +239,35 @@ export class MusicController {
   @Post('play-discovery')
   @HttpCode(HttpStatus.OK)
   @Throttle({ default: { limit: 30, ttl: 60000 } })
-  @ApiOperation({ summary: 'Play a discovery result by externalId — creates a DB stub if needed, then caches' })
+  @ApiOperation({ summary: 'Download (if needed) and play a discovery track — blocks until file is on S3' })
   async playDiscovery(
     @Body() dto: PlayDiscoveryDto,
     @CurrentUser() payload: IPayload,
   ) {
-    const track = await this.tracksRepository.findOrCreate(
+    // ensureCached blocks until the audio file is downloaded and uploaded to S3.
+    // For already-cached tracks this returns instantly; for new tracks it takes
+    // 5–30 s. The client shows a spinner for the whole duration and receives a
+    // valid presigned S3 URL in the response — no more "streamUrl: null" race
+    // that caused the live-stream path to fail through the Cloudflare tunnel.
+    const track = await this.trackCacheService.ensureCached(
       dto.externalId,
       dto.title,
       dto.artist,
-      dto.coverUrl ?? null,
+      dto.coverUrl ?? undefined,
     );
 
-    if (track.isCached && track.s3Key) {
-      void this.tracksRepository.incrementPlayCount(track.id);
-      void this.recommendationsService.fetchAndStoreRecommendations(track.id, track.artist, track.title);
-      // Notify queue service that this track started — triggers background queue fill.
-      this.musicQueueService.onTrackStarted(payload.id, track).catch((err: unknown) =>
-        this.logger.error(`Queue notification failed: ${(err as Error).message}`),
-      );
-      const streamUrl = await this.awsService.getPresignedUrl(track.s3Key);
-      return { track, streamUrl, caching: false };
-    }
+    void this.tracksRepository.incrementPlayCount(track.id);
+    void this.recommendationsService.fetchAndStoreRecommendations(
+      track.id,
+      track.artist,
+      track.title,
+    );
+    this.musicQueueService.onTrackStarted(payload.id, track).catch((err: unknown) =>
+      this.logger.error(`Queue notification failed: ${(err as Error).message}`),
+    );
 
-    // Not cached — live-tee handles download + S3 when the client calls GET /music/stream.
-    return { track, streamUrl: null, caching: true };
+    const streamUrl = await this.awsService.getPresignedUrl(track.s3Key!);
+    return { track, streamUrl, caching: false };
   }
 
   @Post('play/:trackId')
