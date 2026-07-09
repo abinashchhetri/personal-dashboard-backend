@@ -41,7 +41,7 @@ export class AuthController {
     private readonly accountsService: AccountsService,
   ) {
     this.frontendUrl =
-      this.configService.get<string>('FRONTEND_URL') ?? 'http://localhost:3000';
+      this.configService.get<string>('FRONTEND_URL') ?? 'https://dashboard.abinashchhetri.com.np';
 
     // Production (cross-origin): Secure=true + SameSite=none required for
     // cross-domain cookie delivery (frontend on Vercel, backend on tunnel).
