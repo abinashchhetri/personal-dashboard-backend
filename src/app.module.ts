@@ -27,6 +27,8 @@ import { MusicModule } from './music/music.module';
 import { PlaylistsModule } from './playlists/playlists.module';
 import { MealsModule } from './meals/meals.module';
 import { WorkoutModule } from './workout/workout.module';
+import { SolanaPayModule } from './solana-pay/solana-pay.module';
+import { X402Module } from './x402/x402.module';
 
 // Resolve the project-root .env regardless of process.cwd() or which build
 // output this runs from. The exact __dirname depth varies (e.g. compiled
@@ -71,6 +73,8 @@ function resolveEnvFilePath(): string {
     PlaylistsModule,
     MealsModule,
     WorkoutModule,
+    SolanaPayModule,
+    X402Module,
   ],
   controllers: [AppController],
   providers: [AppService],
